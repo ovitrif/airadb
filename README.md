@@ -9,21 +9,21 @@ Interactive Android wireless debugging pairing for macOS.
 Install the latest GitHub release:
 
 ```sh
-curl -fsSL https://github.com/ovitrif/airdroid/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | sh
 ```
 
 Pin a release or install somewhere else:
 
 ```sh
-curl -fsSL https://github.com/ovitrif/airdroid/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.0 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
+  AIRADB_INSTALL_TAG=v0.1.2 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:
 
 ```sh
-git clone https://github.com/ovitrif/airdroid.git
-cd airdroid
+git clone https://github.com/ovitrif/airadb.git
+cd airadb
 cargo build --release
 ```
 

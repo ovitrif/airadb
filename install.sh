@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${AIRADB_INSTALL_REPO:-ovitrif/airdroid}"
+REPO="${AIRADB_INSTALL_REPO:-ovitrif/airadb}"
 BINARY="airadb"
 GITHUB_URL="${AIRADB_INSTALL_GITHUB_URL:-https://github.com}"
 
