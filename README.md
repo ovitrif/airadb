@@ -29,8 +29,33 @@ cargo build --release
 
 ## Usage
 
+After installing, run:
+
 ```sh
 airadb
 ```
 
-On your Android phone, go to Developer options -> Wireless debugging, then follow the prompts. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately.
+Or from a source checkout:
+
+```sh
+cargo run
+```
+
+`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu.
+
+On your Android phone:
+
+1. Go to Developer options -> Wireless debugging.
+2. Tap Pair device with QR code.
+3. Scan the QR code shown by `airadb`.
+
+Once ADB is connected, `airadb` shows options to start `scrcpy`, start `scrcpy` in the background and close the CLI, or close without launching anything. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately.
+
+Useful options:
+
+```sh
+airadb --reset-adb
+airadb --timeout 120
+airadb --adb /path/to/adb --scrcpy /path/to/scrcpy
+airadb --help
+```
