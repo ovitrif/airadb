@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            build_kind: zig
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            build_kind: zig
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            build_kind: native
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            build_kind: native
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: matrix.build_kind == 'zig'
+        run: |
+          python3 -m pip install --user ziglang
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        if: matrix.build_kind == 'zig'
+        run: cargo install --locked cargo-zigbuild
+
+      - name: Build (zig)
+        if: matrix.build_kind == 'zig'
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: matrix.build_kind == 'native'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          target="${{ matrix.target }}"
+          staging="airadb-${tag}-${target}"
+          mkdir "$staging"
+          cp "target/${target}/release/airadb" "$staging/"
+          tar czf "${staging}.tar.gz" "$staging"
+          echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -exec mv {} . \;
+          sha256sum *.tar.gz > checksums.sha256
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd artifacts
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            "$GITHUB_WORKSPACE/install.sh" *.tar.gz checksums.sha256

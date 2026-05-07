@@ -2,6 +2,10 @@
 name = "airadb"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Interactive Android wireless debugging pairing for macOS."
+repository = "https://github.com/ovitrif/airdroid"
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0"
@@ -9,3 +13,10 @@ clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
 qrcode = { version = "0.14", default-features = false }
 rand = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
