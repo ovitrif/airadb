@@ -41,7 +41,7 @@ Or from a source checkout:
 cargo run
 ```
 
-`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu.
+`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu. The default wait time for pairing and connection discovery is 60 seconds.
 
 On your Android phone:
 
@@ -55,7 +55,7 @@ Useful options:
 
 ```sh
 airadb --reset-adb
-airadb --timeout 120
+airadb --timeout 120 # wait longer than the 60-second default
 airadb --adb /path/to/adb --scrcpy /path/to/scrcpy
 airadb --help
 ```

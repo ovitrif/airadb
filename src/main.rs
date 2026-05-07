@@ -32,7 +32,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 90,
+        default_value_t = 60,
         value_name = "SECONDS",
         help = "How long to wait for phone pairing and connection discovery"
     )]
@@ -353,6 +353,10 @@ fn wait_for_ready_device(
     timeout: Duration,
 ) -> Result<adb::AdbDevice> {
     let deadline = Instant::now() + timeout;
+    ui::status(format!(
+        "Waiting for {} seconds for adb devices...",
+        timeout.as_secs()
+    ));
 
     loop {
         if let Some(device) = adb::matching_ready_device(
@@ -368,10 +372,6 @@ fn wait_for_ready_device(
             bail!("timed out waiting for {expected_serial} to appear in adb devices");
         }
 
-        ui::status(format!(
-            "Waiting for adb devices; {}s left before timeout.",
-            seconds_remaining(deadline)
-        ));
         thread::sleep(Duration::from_secs(2));
     }
 }
@@ -388,7 +388,7 @@ fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
     ui::blank_line();
     ui::print_qr(&qr.render_terminal()?);
     ui::blank_line();
-    ui::status("Waiting for QR scan...");
+    ui::status(format!("Waiting for {} seconds...", timeout.as_secs()));
 
     let pairing_address = match wait_for_pairing_endpoint(adb, &qr.instance, timeout)? {
         PairingWaitOutcome::PairingEndpoint(pairing_address) => pairing_address,
@@ -482,10 +482,6 @@ fn wait_for_pairing_endpoint(
             );
         }
 
-        ui::status(format!(
-            "Still waiting for QR scan; {}s left before timeout.",
-            seconds_remaining(deadline)
-        ));
         thread::sleep(Duration::from_millis(500));
     }
 }
@@ -580,7 +576,10 @@ fn connect_and_wait_for_device(
         let candidate_summary = endpoint_summary(&candidates);
 
         if candidates.is_empty() && !reported_waiting_for_endpoint {
-            ui::status("Waiting for the phone to advertise its connection endpoint...");
+            ui::status(format!(
+                "Waiting for {} seconds for the phone to advertise its connection endpoint...",
+                seconds_remaining(deadline)
+            ));
             reported_waiting_for_endpoint = true;
         } else if !candidates.is_empty() && candidate_summary != last_candidate_summary {
             ui::status(format!(
@@ -663,10 +662,6 @@ fn connect_and_wait_for_device(
             return manual_connect_device(adb, baseline_devices, timeout);
         }
 
-        ui::status(format!(
-            "Still waiting; {}s left before timeout.",
-            seconds_remaining(deadline)
-        ));
         thread::sleep(Duration::from_secs(2));
     }
 }
