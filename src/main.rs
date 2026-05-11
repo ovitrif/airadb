@@ -38,14 +38,25 @@ struct Args {
     )]
     timeout: u64,
 
-    #[arg(
-        long,
-        help = "Skip checking for scrcpy before launching it from the menu"
-    )]
+    #[arg(long, help = "Skip checking for scrcpy before launching it")]
     no_scrcpy_check: bool,
 
     #[arg(long, help = "Kill and restart the local ADB server before pairing")]
     reset_adb: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "foreground",
+        help = "Start scrcpy in the background once connected and skip the menu"
+    )]
+    background: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "background",
+        help = "Start scrcpy in the foreground once connected and skip the menu"
+    )]
+    foreground: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -65,9 +76,29 @@ enum PairingWaitOutcome {
     AlreadyConnected(ConnectedPhone),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrcpyLaunchMode {
+    Menu,
+    Background,
+    Foreground,
+}
+
+impl Args {
+    fn scrcpy_launch_mode(&self) -> ScrcpyLaunchMode {
+        if self.background {
+            ScrcpyLaunchMode::Background
+        } else if self.foreground {
+            ScrcpyLaunchMode::Foreground
+        } else {
+            ScrcpyLaunchMode::Menu
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if ui::is_cancelled(&error) => ExitCode::SUCCESS,
         Err(error) => {
             ui::error(format!("{error:#}"));
             ExitCode::FAILURE
@@ -96,35 +127,47 @@ fn run() -> Result<()> {
     };
 
     ui::status(format!("Connected to {}", phone.display_name));
-    connected_phone_menu(&phone, &args)
+    handle_connected_phone(&phone, &args)
+}
+
+fn handle_connected_phone(phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    match args.scrcpy_launch_mode() {
+        ScrcpyLaunchMode::Menu => connected_phone_menu(phone, args),
+        ScrcpyLaunchMode::Background => start_scrcpy_background(phone, args),
+        ScrcpyLaunchMode::Foreground => start_scrcpy_foreground(phone, args),
+    }
 }
 
 fn connected_phone_menu(phone: &ConnectedPhone, args: &Args) -> Result<()> {
     loop {
         match ui::menu(&[
-            "Start scrcpy",
             "Start scrcpy in background and close",
+            "Start scrcpy",
             "Close",
         ])? {
-            1 => {
-                let scrcpy = resolve_scrcpy(args)?;
-                scrcpy.launch(&phone.serial)?;
-            }
-            2 => {
-                let scrcpy = resolve_scrcpy(args)?;
-                let pid = scrcpy.launch_background(&phone.serial)?;
-                ui::status(format!("Started scrcpy in the background (pid {pid})."));
-                return Ok(());
-            }
+            1 => return start_scrcpy_background(phone, args),
+            2 => start_scrcpy_foreground(phone, args)?,
             3 => return Ok(()),
             _ => unreachable!("ui::menu only returns a valid option"),
         }
     }
 }
 
+fn start_scrcpy_background(phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args)?;
+    let pid = scrcpy.launch_background(&phone.serial)?;
+    ui::status(format!("Started scrcpy in the background (pid {pid})."));
+    Ok(())
+}
+
+fn start_scrcpy_foreground(phone: &ConnectedPhone, args: &Args) -> Result<()> {
+    let scrcpy = resolve_scrcpy(args)?;
+    scrcpy.launch(&phone.serial)
+}
+
 fn resolve_scrcpy(args: &Args) -> Result<Scrcpy> {
     Scrcpy::resolve(args.scrcpy.clone(), args.no_scrcpy_check)
-        .context("scrcpy was not found. Install scrcpy, then choose option 1 again")
+        .context("scrcpy was not found. Install scrcpy, then try again")
 }
 
 fn startup_device_choice(adb: &Adb) -> Result<StartupDeviceChoice> {
@@ -219,36 +262,42 @@ fn retrying_pairing_flow(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone>
         match pair_and_connect(adb, timeout) {
             Ok(phone) => return Ok(phone),
             Err(error) => {
-                ui::error(format!("{error:#}"));
+                if ui::is_cancelled(&error) {
+                    ui::status("Pairing cancelled.");
+                } else {
+                    ui::error(format!("{error:#}"));
+                }
 
                 match ui::menu(&[
+                    "Retry QR pairing",
                     "Enter phone IP:port manually",
                     "Reset ADB server and retry",
                     "Pair with pairing code",
-                    "Generate a new QR code",
                     "Close",
                 ])? {
-                    1 => match manual_connect_flow(adb, timeout) {
+                    1 => continue,
+                    2 => match manual_connect_flow(adb, timeout) {
                         Ok(phone) => return Ok(phone),
+                        Err(error) if ui::is_cancelled(&error) => return Err(error),
                         Err(error) => {
                             ui::error(format!("{error:#}"));
                             continue;
                         }
                     },
-                    2 => {
+                    3 => {
                         reset_adb_server(adb)?;
                         warn_if_mdns_check_fails(adb);
                         continue;
                     }
-                    3 => match pairing_code_flow(adb, timeout) {
+                    4 => match pairing_code_flow(adb, timeout) {
                         Ok(phone) => return Ok(phone),
+                        Err(error) if ui::is_cancelled(&error) => return Err(error),
                         Err(error) => {
                             ui::error(format!("{error:#}"));
                             continue;
                         }
                     },
-                    4 => continue,
-                    5 => return Err(error),
+                    5 => return Err(ui::cancelled()),
                     _ => unreachable!("ui::menu only returns a valid option"),
                 }
             }
@@ -353,26 +402,32 @@ fn wait_for_ready_device(
     timeout: Duration,
 ) -> Result<adb::AdbDevice> {
     let deadline = Instant::now() + timeout;
-    ui::status(format!(
-        "Waiting for {} seconds for adb devices...",
-        timeout.as_secs()
-    ));
+    ui::status("Waiting for adb devices...");
+    ui::status(ui::CANCEL_HINT);
+    let mut countdown = ui::Countdown::new("ADB device wait");
 
     loop {
+        countdown.tick(remaining_until(deadline))?;
+
         if let Some(device) = adb::matching_ready_device(
             &adb.devices().unwrap_or_default(),
             expected_serial,
             baseline_devices,
         ) {
+            countdown.finish();
             ui::status(format!("ADB device is ready: {}", device.display_name()));
             return Ok(device);
         }
 
         if Instant::now() >= deadline {
+            countdown.finish();
             bail!("timed out waiting for {expected_serial} to appear in adb devices");
         }
 
-        thread::sleep(Duration::from_secs(2));
+        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_secs(2))) {
+            countdown.finish();
+            return Err(error);
+        }
     }
 }
 
@@ -388,7 +443,7 @@ fn pair_and_connect(adb: &Adb, timeout: Duration) -> Result<ConnectedPhone> {
     ui::blank_line();
     ui::print_qr(&qr.render_terminal()?);
     ui::blank_line();
-    ui::status(format!("Waiting for {} seconds...", timeout.as_secs()));
+    ui::status(ui::CANCEL_HINT);
 
     let pairing_address = match wait_for_pairing_endpoint(adb, &qr.instance, timeout)? {
         PairingWaitOutcome::PairingEndpoint(pairing_address) => pairing_address,
@@ -419,6 +474,7 @@ fn wait_for_pairing_endpoint(
     timeout: Duration,
 ) -> Result<PairingWaitOutcome> {
     let deadline = Instant::now() + timeout;
+    let mut countdown = ui::Countdown::new("Waiting for QR scan");
     let mut reported_direct_check = false;
     let mut reported_device_check_error = false;
     let mut reported_adb_error = false;
@@ -426,16 +482,24 @@ fn wait_for_pairing_endpoint(
     let mut offered_multiple_existing_devices = false;
 
     loop {
+        countdown.tick(remaining_until(deadline))?;
+
         match ready_connected_phones(adb) {
             Ok(ready_phones) => {
+                if !ready_phones.is_empty() {
+                    countdown.finish();
+                }
+
                 if let Some(phone) = already_connected_phone_choice(
                     ready_phones,
                     &mut offered_multiple_existing_devices,
                 )? {
+                    countdown.finish();
                     return Ok(PairingWaitOutcome::AlreadyConnected(phone));
                 }
             }
             Err(error) if !reported_device_check_error => {
+                countdown.finish();
                 ui::warn(format!("could not check existing ADB devices: {error:#}"));
                 reported_device_check_error = true;
             }
@@ -448,10 +512,12 @@ fn wait_for_pairing_endpoint(
                     .into_iter()
                     .find(|service| service.instance == instance && service.is_pairing_service())
                 {
+                    countdown.finish();
                     return Ok(PairingWaitOutcome::PairingEndpoint(service.address));
                 }
             }
             Err(error) if !reported_adb_error => {
+                countdown.finish();
                 ui::warn(format!("adb mDNS lookup failed: {error:#}"));
                 reported_adb_error = true;
             }
@@ -459,17 +525,20 @@ fn wait_for_pairing_endpoint(
         }
 
         if !reported_direct_check {
+            countdown.finish();
             ui::status("Also checking macOS Bonjour directly for the QR pairing service...");
             reported_direct_check = true;
         }
 
         match dnssd::discover_pairing_endpoint(instance, Duration::from_secs(2)) {
             Ok(Some(endpoint)) => {
+                countdown.finish();
                 ui::status("Phone found through macOS Bonjour.");
                 return Ok(PairingWaitOutcome::PairingEndpoint(endpoint));
             }
             Ok(None) => {}
             Err(error) if !reported_bonjour_error => {
+                countdown.finish();
                 ui::warn(format!("Bonjour pairing lookup failed: {error:#}"));
                 reported_bonjour_error = true;
             }
@@ -477,12 +546,16 @@ fn wait_for_pairing_endpoint(
         }
 
         if Instant::now() >= deadline {
+            countdown.finish();
             bail!(
                 "timed out waiting for the phone to advertise the QR pairing service `{instance}`"
             );
         }
 
-        thread::sleep(Duration::from_millis(500));
+        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_millis(500))) {
+            countdown.finish();
+            return Err(error);
+        }
     }
 }
 
@@ -531,6 +604,7 @@ fn connect_and_wait_for_device(
     timeout: Duration,
 ) -> Result<adb::AdbDevice> {
     let deadline = Instant::now() + timeout;
+    let mut countdown = ui::Countdown::new("Connection endpoint wait");
     let mut expected_serial = pairing_address.to_string();
     let mut announced_endpoints = HashSet::new();
     let mut reported_waiting_for_endpoint = false;
@@ -540,11 +614,14 @@ fn connect_and_wait_for_device(
     let mut reported_connect_mdns_error = false;
 
     loop {
+        countdown.tick(remaining_until(deadline))?;
+
         let ready_devices = adb.devices().unwrap_or_default();
 
         if let Some(device) =
             adb::matching_ready_device(&ready_devices, &expected_serial, baseline_devices)
         {
+            countdown.finish();
             ui::status(format!("ADB device is ready: {}", device.display_name()));
             return Ok(device);
         }
@@ -555,6 +632,7 @@ fn connect_and_wait_for_device(
             .count();
 
         if ready_device_count > 0 {
+            countdown.finish();
             ui::status(format!(
                 "ADB sees {ready_device_count} ready device(s), but not the just-paired phone yet."
             ));
@@ -564,6 +642,7 @@ fn connect_and_wait_for_device(
             Ok(services) => services,
             Err(error) => {
                 if !reported_connect_mdns_error {
+                    countdown.finish();
                     ui::warn(format!("adb mDNS connect lookup failed: {error:#}"));
                     reported_connect_mdns_error = true;
                 }
@@ -576,12 +655,12 @@ fn connect_and_wait_for_device(
         let candidate_summary = endpoint_summary(&candidates);
 
         if candidates.is_empty() && !reported_waiting_for_endpoint {
-            ui::status(format!(
-                "Waiting for {} seconds for the phone to advertise its connection endpoint...",
-                seconds_remaining(deadline)
-            ));
+            countdown.finish();
+            ui::status("Waiting for the phone to advertise its connection endpoint...");
+            ui::status(ui::CANCEL_HINT);
             reported_waiting_for_endpoint = true;
         } else if !candidates.is_empty() && candidate_summary != last_candidate_summary {
+            countdown.finish();
             ui::status(format!(
                 "Connect endpoint candidate(s): {candidate_summary}"
             ));
@@ -590,6 +669,7 @@ fn connect_and_wait_for_device(
 
         if candidates.is_empty() && should_check_bonjour(last_bonjour_check) {
             last_bonjour_check = Some(Instant::now());
+            countdown.finish();
 
             if let Some(device) =
                 try_direct_bonjour_connect(adb, pairing_address, baseline_devices, None, timeout)?
@@ -600,10 +680,12 @@ fn connect_and_wait_for_device(
 
         for service in candidates {
             if announced_endpoints.insert(service.address.clone()) {
+                countdown.finish();
                 ui::status(format!("Connecting to {}...", service.address));
             }
 
             attempt += 1;
+            countdown.finish();
             ui::status(format!(
                 "Attempt {attempt}: adb connect {}",
                 service.address
@@ -614,6 +696,7 @@ fn connect_and_wait_for_device(
                     expected_serial = adb::connect_serial_from_output(&output.combined_output())
                         .unwrap_or_else(|| service.address.clone());
 
+                    countdown.finish();
                     ui::status("Verifying the device is ready...");
 
                     if let Some(device) = adb::matching_ready_device(
@@ -621,10 +704,12 @@ fn connect_and_wait_for_device(
                         &expected_serial,
                         baseline_devices,
                     ) {
+                        countdown.finish();
                         return Ok(device);
                     }
                 }
                 Err(error) => {
+                    countdown.finish();
                     ui::warn(format!(
                         "ADB mDNS endpoint {} failed: {error:#}",
                         service.address
@@ -652,6 +737,7 @@ fn connect_and_wait_for_device(
         }
 
         if Instant::now() >= deadline {
+            countdown.finish();
             if let Some(device) = try_ui_hierarchy_connect(adb, baseline_devices, timeout)? {
                 return Ok(device);
             }
@@ -662,7 +748,10 @@ fn connect_and_wait_for_device(
             return manual_connect_device(adb, baseline_devices, timeout);
         }
 
-        thread::sleep(Duration::from_secs(2));
+        if let Err(error) = ui::sleep_or_cancel(poll_delay(deadline, Duration::from_secs(2))) {
+            countdown.finish();
+            return Err(error);
+        }
     }
 }
 
@@ -836,13 +925,40 @@ fn endpoint_summary(services: &[adb::MdnsService]) -> String {
         .join(", ")
 }
 
-fn seconds_remaining(deadline: Instant) -> u64 {
-    deadline.saturating_duration_since(Instant::now()).as_secs()
+fn remaining_until(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+fn poll_delay(deadline: Instant, max_delay: Duration) -> Duration {
+    remaining_until(deadline).min(max_delay)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_scrcpy_launch_flags() {
+        let default_args = Args::try_parse_from(["airadb"]).unwrap();
+        assert_eq!(default_args.scrcpy_launch_mode(), ScrcpyLaunchMode::Menu);
+
+        let background_args = Args::try_parse_from(["airadb", "--background"]).unwrap();
+        assert_eq!(
+            background_args.scrcpy_launch_mode(),
+            ScrcpyLaunchMode::Background
+        );
+
+        let foreground_args = Args::try_parse_from(["airadb", "--foreground"]).unwrap();
+        assert_eq!(
+            foreground_args.scrcpy_launch_mode(),
+            ScrcpyLaunchMode::Foreground
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_scrcpy_launch_flags() {
+        assert!(Args::try_parse_from(["airadb", "--background", "--foreground"]).is_err());
+    }
 
     #[test]
     fn validates_ipv4_endpoint_shape() {

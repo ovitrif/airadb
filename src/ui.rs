@@ -1,4 +1,6 @@
 use std::io::{self, Write};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor;
@@ -7,6 +9,19 @@ use crossterm::execute;
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal;
 use crossterm::terminal::{Clear, ClearType};
+
+pub const CANCEL_HINT: &str = "Press either ⌃ + C, ESC, C or X to cancel and exit.";
+
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 pub fn status(message: impl AsRef<str>) {
     println!("{}", message.as_ref());
@@ -26,6 +41,106 @@ pub fn blank_line() {
 
 pub fn print_qr(qr: &str) {
     println!("{qr}");
+}
+
+pub fn cancelled() -> anyhow::Error {
+    Cancelled.into()
+}
+
+pub fn is_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Cancelled>().is_some()
+}
+
+pub fn sleep_or_cancel(duration: Duration) -> Result<()> {
+    if duration.is_zero() {
+        return Ok(());
+    }
+
+    if terminal::enable_raw_mode().is_err() {
+        thread::sleep(duration);
+        return Ok(());
+    }
+
+    let raw_mode = RawModeGuard;
+    let deadline = Instant::now() + duration;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+
+        if remaining.is_zero() {
+            return Ok(());
+        }
+
+        if !event::poll(remaining.min(Duration::from_millis(100)))
+            .context("failed to poll keypress")?
+        {
+            continue;
+        }
+
+        match event::read().context("failed to read keypress")? {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && is_wait_cancel_key(key.code, key.modifiers) =>
+            {
+                drop(raw_mode);
+                return Err(cancelled());
+            }
+            _ => {}
+        }
+    }
+}
+
+pub struct Countdown {
+    label: String,
+    last_seconds: Option<u64>,
+    wrote_line: bool,
+}
+
+impl Countdown {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            last_seconds: None,
+            wrote_line: false,
+        }
+    }
+
+    pub fn tick(&mut self, remaining: Duration) -> Result<()> {
+        let seconds = display_seconds(remaining);
+
+        if self.last_seconds == Some(seconds) {
+            return Ok(());
+        }
+
+        execute!(
+            io::stdout(),
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            Print(format!("{}: {seconds} seconds remaining...", self.label))
+        )?;
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        self.last_seconds = Some(seconds);
+        self.wrote_line = true;
+
+        Ok(())
+    }
+
+    pub fn finish(&mut self) {
+        if self.wrote_line {
+            println!();
+            self.wrote_line = false;
+            self.last_seconds = None;
+        }
+    }
+}
+
+fn display_seconds(remaining: Duration) -> u64 {
+    if remaining.is_zero() {
+        0
+    } else {
+        remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
+    }
 }
 
 pub fn menu(options: &[&str]) -> Result<usize> {
@@ -62,12 +177,12 @@ fn interactive_menu(options: &[&str]) -> Result<usize> {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     drop(raw_mode);
                     println!();
-                    bail!("interrupted");
+                    return Err(cancelled());
                 }
                 KeyCode::Esc => {
                     drop(raw_mode);
                     println!();
-                    bail!("interrupted");
+                    return Err(cancelled());
                 }
                 KeyCode::Up => {
                     selected = previous_selection(selected, options.len());
@@ -187,6 +302,15 @@ fn selection_from_char(character: char, option_count: usize) -> Option<usize> {
     }
 }
 
+fn is_wait_cancel_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    match code {
+        KeyCode::Esc => true,
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Char(character) => matches!(character.to_ascii_lowercase(), 'c' | 'x'),
+        _ => false,
+    }
+}
+
 fn previous_selection(selected: usize, option_count: usize) -> usize {
     if selected == 0 {
         option_count - 1
@@ -248,6 +372,28 @@ mod tests {
         assert_eq!(selection_from_char('2', 2), Some(2));
         assert_eq!(selection_from_char('3', 2), None);
         assert_eq!(selection_from_char('x', 2), None);
+    }
+
+    #[test]
+    fn recognizes_wait_cancel_keys() {
+        assert!(is_wait_cancel_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(is_wait_cancel_key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(is_wait_cancel_key(KeyCode::Char('C'), KeyModifiers::SHIFT));
+        assert!(is_wait_cancel_key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(is_wait_cancel_key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(is_wait_cancel_key(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert!(!is_wait_cancel_key(KeyCode::Char('q'), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn rounds_countdown_seconds_up() {
+        assert_eq!(display_seconds(Duration::ZERO), 0);
+        assert_eq!(display_seconds(Duration::from_millis(1)), 1);
+        assert_eq!(display_seconds(Duration::from_millis(1_001)), 2);
+        assert_eq!(display_seconds(Duration::from_secs(2)), 2);
     }
 
     #[test]

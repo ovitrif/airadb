@@ -16,7 +16,7 @@ Pin a release or install somewhere else:
 
 ```sh
 curl -fsSL https://github.com/ovitrif/airadb/releases/latest/download/install.sh | \
-  AIRADB_INSTALL_TAG=v0.1.2 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
+  AIRADB_INSTALL_TAG=v0.1.3 AIRADB_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 Or build from source:
@@ -41,7 +41,7 @@ Or from a source checkout:
 cargo run
 ```
 
-`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu. The default wait time for pairing and connection discovery is 60 seconds.
+`airadb` expects `adb` to be installed and available on your `PATH`. `scrcpy` is optional, but needed if you want to start screen mirroring from the final menu or with `--background` / `--foreground`. The default wait time for pairing and connection discovery is 60 seconds.
 
 On your Android phone:
 
@@ -49,13 +49,15 @@ On your Android phone:
 2. Tap Pair device with QR code.
 3. Scan the QR code shown by `airadb`.
 
-Once ADB is connected, `airadb` shows options to start `scrcpy`, start `scrcpy` in the background and close the CLI, or close without launching anything. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately.
+Once ADB is connected, `airadb` shows options to start `scrcpy` in the background and close the CLI, start `scrcpy`, or close without launching anything. Use `--background` or `--foreground` to skip that final menu. If a device is already connected through ADB, `airadb` skips pairing and offers the `scrcpy` options immediately unless a launch flag was provided.
 
 Useful options:
 
 ```sh
 airadb --reset-adb
 airadb --timeout 120 # wait longer than the 60-second default
+airadb --background # start scrcpy in the background and close
+airadb --foreground # start scrcpy in the foreground
 airadb --adb /path/to/adb --scrcpy /path/to/scrcpy
 airadb --help
 ```
